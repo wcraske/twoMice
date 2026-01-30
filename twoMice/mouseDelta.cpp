@@ -1,3 +1,5 @@
+#include "pch.h"
+
 #include "mouseDelta.h"
 //https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input
 // first create array of RAWINPUTDEVICE structures 
