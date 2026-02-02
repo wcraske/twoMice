@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="twoMice/twoMice.vcxproj" Id="58924d25-cf84-4bef-8eec-0c4f0c847191" />
+</Solution>
