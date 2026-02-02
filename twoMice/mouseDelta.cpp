@@ -1,5 +1,4 @@
 #include "pch.h"
-
 #include "mouseDelta.h"
 //https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input
 // first create array of RAWINPUTDEVICE structures 
@@ -50,26 +49,6 @@ static HANDLE mouse2 = nullptr;
 
 //
 // =====================
-//  WINDOW PROC HOOK (NEW)
-// =====================
-//
-
-//original unity window procedure
-static WNDPROC g_OriginalWndProc = nullptr;
-//unity window handle
-static HWND g_Hwnd = nullptr;
-
-
-//
-// =====================
-//  FORWARD DECLARATIONS
-// =====================
-//
-LRESULT CALLBACK TwoMiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-
-//
-// =====================
 //  INITIALIZE RAW INPUT
 // =====================
 //
@@ -77,8 +56,6 @@ LRESULT CALLBACK TwoMiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 //initialize raw input for mice
 BOOL InitializeRawInput(HWND hwnd)
 {
-    g_Hwnd = hwnd;
-
     //define a RAWINPUTDEVICE structure
     RAWINPUTDEVICE rid;
     //specify generic controls
@@ -94,38 +71,14 @@ BOOL InitializeRawInput(HWND hwnd)
     if (!RegisterRawInputDevices(&rid, 1, sizeof(rid)))
         return FALSE;
 
-    // --- NEW ---
-    // hook unity window procedure so we can receive WM_INPUT
-    g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(
-        hwnd,
-        GWLP_WNDPROC,
-        (LONG_PTR)TwoMiceWndProc
-    );
-
-    return g_OriginalWndProc != nullptr;
-}
-
-
-//
-//  CUSTOM WINDOW PROC
-//
-
-//intercepts windows messages before unity processes them
-LRESULT CALLBACK TwoMiceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    //listen for raw input messages
-    if (msg == WM_INPUT)
-    {
-        HandleRawInput(lParam);
-    }
-
-    //pass everything back to unity
-    return CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
+    //don't hook the window proc - Unity will manually call HandleRawInput
+    return TRUE;
 }
 
 
 //
 //  HANDLE RAW INPUT
+//
 
 
 //handle WM_INPUT messages
