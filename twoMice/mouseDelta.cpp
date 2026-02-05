@@ -1,27 +1,29 @@
 #include "pch.h"
 #include "mouseDelta.h"
-//https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input
-// first create array of RAWINPUTDEVICE structures 
-//this specifies top level collection, defined by usage page and id
-//application call RegisterRawInputDevices to register for the devices	
-//to get list of raw input devices call GetRawInputDeviceList
-//to get device info call GetRawInputDeviceInfo
-//through dwFlags, application can select spcific devices to listen or ignore
-//through this we can create an application that listens to two mice and returns deltas
-//https://yellowafterlife.itch.io/gamemaker-raw-input
-
 
 //reduces size for compilation
 #define WIN32_LEAN_AND_MEAN
 
 #include <Windows.h>
-//to map mouse handles to their deltas
 #include <unordered_map>
 
+//for debugging - output to file
+#include <fstream>
+#include <string>
+
+//debug log function
+void DebugLog(const std::string& message)
+{
+    static std::ofstream logFile("TwoMice_Debug.txt", std::ios::app);
+    if (logFile.is_open())
+    {
+        logFile << message << std::endl;
+        logFile.flush();
+    }
+}
+
 //
-// =====================
 //  RAW INPUT STATE
-// =====================
 //
 
 //structure to hold delta values
@@ -46,6 +48,8 @@ static std::unordered_map<HANDLE, MouseState> mouseData;
 static HANDLE mouse1 = nullptr;
 static HANDLE mouse2 = nullptr;
 
+//track how many mice we've seen
+static int miceDetected = 0;
 
 //
 // =====================
@@ -54,8 +58,10 @@ static HANDLE mouse2 = nullptr;
 //
 
 //initialize raw input for mice
-BOOL InitializeRawInput(HWND hwnd)
+extern "C" TWOMICE_API BOOL InitializeRawInput(HWND hwnd)
 {
+    DebugLog("=== InitializeRawInput called ===");
+
     //define a RAWINPUTDEVICE structure
     RAWINPUTDEVICE rid;
     //specify generic controls
@@ -69,9 +75,12 @@ BOOL InitializeRawInput(HWND hwnd)
 
     //if registration fails return false
     if (!RegisterRawInputDevices(&rid, 1, sizeof(rid)))
+    {
+        DebugLog("ERROR: RegisterRawInputDevices FAILED");
         return FALSE;
+    }
 
-    //don't hook the window proc - Unity will manually call HandleRawInput
+    DebugLog("SUCCESS: RegisterRawInputDevices succeeded");
     return TRUE;
 }
 
@@ -80,10 +89,8 @@ BOOL InitializeRawInput(HWND hwnd)
 //  HANDLE RAW INPUT
 //
 
-
 //handle WM_INPUT messages
-//LPARAM lParam contains the handle to the RAWINPUT structure, must be casted to HRAWINPUT, since same 
-TWOMICE_API void HandleRawInput(LPARAM lParam)
+extern "C" TWOMICE_API void HandleRawInput(LPARAM lParam)
 {
     //size variable to hold size of raw input data
     UINT size = 0;
@@ -98,8 +105,9 @@ TWOMICE_API void HandleRawInput(LPARAM lParam)
             sizeof(RAWINPUTHEADER)
         );
 
-    if (rawInputDataresult == 0 || rawInputDataresult == (UINT)-1)
+    if (rawInputDataresult == (UINT)-1)
     {
+        DebugLog("ERROR: GetRawInputData failed to get size");
         return;
     }
 
@@ -108,13 +116,20 @@ TWOMICE_API void HandleRawInput(LPARAM lParam)
     RAWINPUT* buffer = reinterpret_cast<RAWINPUT*>(rawBuffer);
 
     //call again to fill buffer
-    GetRawInputData(
+    UINT result = GetRawInputData(
         (HRAWINPUT)lParam,
         RID_INPUT,
         buffer,
         &size,
         sizeof(RAWINPUTHEADER)
     );
+
+    if (result == (UINT)-1)
+    {
+        DebugLog("ERROR: GetRawInputData failed to fill buffer");
+        delete[] rawBuffer;
+        return;
+    }
 
     //if not mouse data, free buffer and return
     if (buffer->header.dwType != RIM_TYPEMOUSE)
@@ -125,54 +140,74 @@ TWOMICE_API void HandleRawInput(LPARAM lParam)
 
     //handle device is the mouse handle
     HANDLE device = buffer->header.hDevice;
-    int dx = buffer->data.mouse.lLastX;
-    int dy = buffer->data.mouse.lLastY;
-    USHORT buttonFlags = buffer->data.mouse.usButtonFlags;
 
-    //assign first two mice to mouse1 and mouse2
-    if (mouse1 == nullptr)
+    //CRITICAL FIX: Check the flags to see if this is relative movement
+    //Raw input can report MOUSE_MOVE_RELATIVE or MOUSE_MOVE_ABSOLUTE
+    //We only want relative movement for delta tracking
+    if (!(buffer->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE))
     {
-        mouse1 = device;
-    }
-    else if (mouse2 == nullptr && device != mouse1)
-    {
-        mouse2 = device;
-    }
+        int dx = buffer->data.mouse.lLastX;
+        int dy = buffer->data.mouse.lLastY;
+        USHORT buttonFlags = buffer->data.mouse.usButtonFlags;
 
-    //accumulate deltas only for tracked mice
-    if (device == mouse1 || device == mouse2)
-    {
-        auto& state = mouseData[device];
-
-        state.dx += dx;
-        state.dy += dy;
-
-        if (buttonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
+        //assign first two mice to mouse1 and mouse2
+        if (mouse1 == nullptr)
         {
-            if (!state.leftDown)
-                state.leftPressed = true;
-
-            state.leftDown = true;
+            mouse1 = device;
+            miceDetected++;
+            DebugLog("MOUSE 1 DETECTED: Handle = " + std::to_string((long long)device));
+        }
+        else if (mouse2 == nullptr && device != mouse1)
+        {
+            mouse2 = device;
+            miceDetected++;
+            DebugLog("MOUSE 2 DETECTED: Handle = " + std::to_string((long long)device));
         }
 
-        if (buttonFlags & RI_MOUSE_LEFT_BUTTON_UP)
+        //accumulate deltas only for tracked mice
+        if (device == mouse1 || device == mouse2)
         {
-            state.leftDown = false;
-            state.leftReleased = true;
-        }
+            auto& state = mouseData[device];
 
-        if (buttonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
-        {
-            if (!state.rightDown)
-                state.rightPressed = true;
+            //log first few deltas to verify accumulation
+            static int logCount = 0;
+            if (logCount < 10 && (dx != 0 || dy != 0))
+            {
+                std::string mouseNum = (device == mouse1) ? "MOUSE1" : "MOUSE2";
+                DebugLog(mouseNum + " RAW DELTA: dx=" + std::to_string(dx) + " dy=" + std::to_string(dy));
+                logCount++;
+            }
 
-            state.rightDown = true;
-        }
+            state.dx += dx;
+            state.dy += dy;
 
-        if (buttonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
-        {
-            state.rightDown = false;
-            state.rightReleased = true;
+            if (buttonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
+            {
+                if (!state.leftDown)
+                    state.leftPressed = true;
+
+                state.leftDown = true;
+            }
+
+            if (buttonFlags & RI_MOUSE_LEFT_BUTTON_UP)
+            {
+                state.leftDown = false;
+                state.leftReleased = true;
+            }
+
+            if (buttonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+            {
+                if (!state.rightDown)
+                    state.rightPressed = true;
+
+                state.rightDown = true;
+            }
+
+            if (buttonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
+            {
+                state.rightDown = false;
+                state.rightReleased = true;
+            }
         }
     }
 
@@ -184,12 +219,21 @@ TWOMICE_API void HandleRawInput(LPARAM lParam)
 //  PUBLIC API 
 
 //get the accumulated delta for mouse1
-TWOMICE_API void GetMouse1Delta(int& dx, int& dy)
+extern "C" TWOMICE_API void GetMouse1Delta(int& dx, int& dy)
 {
     if (mouse1 && mouseData.count(mouse1))
     {
         dx = mouseData[mouse1].dx;
         dy = mouseData[mouse1].dy;
+
+        //log retrieval for first few calls
+        static int getCount1 = 0;
+        if (getCount1 < 5)
+        {
+            DebugLog("GetMouse1Delta: returning dx=" + std::to_string(dx) + " dy=" + std::to_string(dy));
+            getCount1++;
+        }
+
         mouseData[mouse1].dx = 0;
         mouseData[mouse1].dy = 0;
     }
@@ -201,12 +245,21 @@ TWOMICE_API void GetMouse1Delta(int& dx, int& dy)
 }
 
 //get the accumulated delta for mouse2
-TWOMICE_API void GetMouse2Delta(int& dx, int& dy)
+extern "C" TWOMICE_API void GetMouse2Delta(int& dx, int& dy)
 {
     if (mouse2 && mouseData.count(mouse2))
     {
         dx = mouseData[mouse2].dx;
         dy = mouseData[mouse2].dy;
+
+        //log retrieval for first few calls
+        static int getCount2 = 0;
+        if (getCount2 < 5)
+        {
+            DebugLog("GetMouse2Delta: returning dx=" + std::to_string(dx) + " dy=" + std::to_string(dy));
+            getCount2++;
+        }
+
         mouseData[mouse2].dx = 0;
         mouseData[mouse2].dy = 0;
     }
@@ -218,7 +271,7 @@ TWOMICE_API void GetMouse2Delta(int& dx, int& dy)
 }
 
 //mouse 1 left button
-TWOMICE_API bool GetMouse1LeftPressed()
+extern "C" TWOMICE_API bool GetMouse1LeftPressed()
 {
     if (mouse1 && mouseData.count(mouse1))
     {
@@ -229,7 +282,7 @@ TWOMICE_API bool GetMouse1LeftPressed()
     return false;
 }
 
-TWOMICE_API bool GetMouse1LeftDown()
+extern "C" TWOMICE_API bool GetMouse1LeftDown()
 {
     if (mouse1 && mouseData.count(mouse1))
         return mouseData[mouse1].leftDown;
@@ -237,7 +290,7 @@ TWOMICE_API bool GetMouse1LeftDown()
     return false;
 }
 
-TWOMICE_API bool GetMouse1LeftReleased()
+extern "C" TWOMICE_API bool GetMouse1LeftReleased()
 {
     if (mouse1 && mouseData.count(mouse1))
     {
@@ -249,7 +302,7 @@ TWOMICE_API bool GetMouse1LeftReleased()
 }
 
 // Mouse 1 right button
-TWOMICE_API bool GetMouse1RightPressed()
+extern "C" TWOMICE_API bool GetMouse1RightPressed()
 {
     if (mouse1 && mouseData.count(mouse1))
     {
@@ -260,7 +313,7 @@ TWOMICE_API bool GetMouse1RightPressed()
     return false;
 }
 
-TWOMICE_API bool GetMouse1RightDown()
+extern "C" TWOMICE_API bool GetMouse1RightDown()
 {
     if (mouse1 && mouseData.count(mouse1))
         return mouseData[mouse1].rightDown;
@@ -268,7 +321,7 @@ TWOMICE_API bool GetMouse1RightDown()
     return false;
 }
 
-TWOMICE_API bool GetMouse1RightReleased()
+extern "C" TWOMICE_API bool GetMouse1RightReleased()
 {
     if (mouse1 && mouseData.count(mouse1))
     {
@@ -280,7 +333,7 @@ TWOMICE_API bool GetMouse1RightReleased()
 }
 
 // Mouse 2 left button
-TWOMICE_API bool GetMouse2LeftPressed()
+extern "C" TWOMICE_API bool GetMouse2LeftPressed()
 {
     if (mouse2 && mouseData.count(mouse2))
     {
@@ -291,7 +344,7 @@ TWOMICE_API bool GetMouse2LeftPressed()
     return false;
 }
 
-TWOMICE_API bool GetMouse2LeftDown()
+extern "C" TWOMICE_API bool GetMouse2LeftDown()
 {
     if (mouse2 && mouseData.count(mouse2))
         return mouseData[mouse2].leftDown;
@@ -299,7 +352,7 @@ TWOMICE_API bool GetMouse2LeftDown()
     return false;
 }
 
-TWOMICE_API bool GetMouse2LeftReleased()
+extern "C" TWOMICE_API bool GetMouse2LeftReleased()
 {
     if (mouse2 && mouseData.count(mouse2))
     {
@@ -311,7 +364,7 @@ TWOMICE_API bool GetMouse2LeftReleased()
 }
 
 //mouse 2 right button
-TWOMICE_API bool GetMouse2RightPressed()
+extern "C" TWOMICE_API bool GetMouse2RightPressed()
 {
     if (mouse2 && mouseData.count(mouse2))
     {
@@ -322,7 +375,7 @@ TWOMICE_API bool GetMouse2RightPressed()
     return false;
 }
 
-TWOMICE_API bool GetMouse2RightDown()
+extern "C" TWOMICE_API bool GetMouse2RightDown()
 {
     if (mouse2 && mouseData.count(mouse2))
         return mouseData[mouse2].rightDown;
@@ -330,7 +383,7 @@ TWOMICE_API bool GetMouse2RightDown()
     return false;
 }
 
-TWOMICE_API bool GetMouse2RightReleased()
+extern "C" TWOMICE_API bool GetMouse2RightReleased()
 {
     if (mouse2 && mouseData.count(mouse2))
     {
