@@ -51,11 +51,7 @@ static HANDLE mouse2 = nullptr;
 //track how many mice we've seen
 static int miceDetected = 0;
 
-//
-// =====================
-//  INITIALIZE RAW INPUT
-// =====================
-//
+
 
 //initialize raw input for mice
 extern "C" TWOMICE_API BOOL InitializeRawInput(HWND hwnd)
@@ -85,9 +81,9 @@ extern "C" TWOMICE_API BOOL InitializeRawInput(HWND hwnd)
 }
 
 
-//
+
 //  HANDLE RAW INPUT
-//
+
 
 //handle WM_INPUT messages
 extern "C" TWOMICE_API void HandleRawInput(LPARAM lParam)
@@ -141,9 +137,6 @@ extern "C" TWOMICE_API void HandleRawInput(LPARAM lParam)
     //handle device is the mouse handle
     HANDLE device = buffer->header.hDevice;
 
-    //CRITICAL FIX: Check the flags to see if this is relative movement
-    //Raw input can report MOUSE_MOVE_RELATIVE or MOUSE_MOVE_ABSOLUTE
-    //We only want relative movement for delta tracking
     if (!(buffer->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE))
     {
         int dx = buffer->data.mouse.lLastX;
